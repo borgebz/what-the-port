@@ -11,7 +11,9 @@ enum ProcessControl {
     /// anything still running after a grace period. Each pid is re-checked
     /// against its start time first so a reused pid is never signalled.
     static func stop(_ server: Server, completion: (() -> Void)? = nil) {
-        let targets = server.processStarts
+        // A container's listener is its runtime's helper; signalling it would
+        // stop every container. ServerMonitor sends those to the runtime instead.
+        let targets = server.container == nil ? server.processStarts : [:]
         for pid in targets.keys where isSameProcess(pid, startedAt: targets[pid]) {
             kill(pid, SIGTERM)
         }

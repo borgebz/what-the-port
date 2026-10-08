@@ -10,6 +10,7 @@ struct ScanConfig {
     var linkConductor = true
     var linkPane = true
     var showBranches = true
+    var showContainers = true
 }
 
 /// Builds the list of servers from sockets and the process table. Holds the
@@ -36,11 +37,16 @@ final class ScanEngine: @unchecked Sendable {
         var usage: (pid_t) -> ProcUsage? = ProcessInspector.usage
         var arguments: (pid_t) -> ProcArgs? = ProcessInspector.arguments
         var currentDirectory: (pid_t) -> String? = ProcessInspector.currentDirectory
+        var containers: (ContainerRuntime) -> [ContainerInfo]? = DockerEngine.containers
+        var containerUsage: (ContainerInfo) -> ContainerUsage? = { DockerEngine.usage($0.id, runtime: $0.runtime) }
+        var containerStart: (ContainerInfo) -> Date? = { DockerEngine.startedAt($0.id, runtime: $0.runtime) }
     }
     private let inspector: Inspector
     init(inspector: Inspector = Inspector()) { self.inspector = inspector }
 
     private var previousCPU: [pid_t: (start: Date, nanoseconds: UInt64, at: Date)] = [:]
+    private var previousContainerCPU: [String: (nanoseconds: UInt64, at: Date)] = [:]
+    private var containerStarts: [String: Date] = [:]
     private var histories: [String: [Sample]] = [:]
     private var lastActive: [String: Date] = [:]
     private var argsCache: [pid_t: (start: Date, args: ProcArgs?)] = [:]
@@ -57,8 +63,33 @@ final class ScanEngine: @unchecked Sendable {
         var servers: [Server] = []
         var seenKeys = Set<String>()
         var livePids = Set<pid_t>()
+        var liveContainers = Set<String>()
+
+        // Docker and OrbStack publish container ports from their own helper
+        // process, so these rows belong to containers, not to that helper.
+        var runtimeByPort: [Int: ContainerRuntime] = [:]
+        if config.showContainers {
+            for socket in sockets.listening where socket.port >= config.minPort && socket.port <= config.maxPort {
+                if let listener = processes[socket.pid], let runtime = runtime(of: listener) {
+                    runtimeByPort[socket.port] = runtime
+                }
+            }
+        }
+        let containers = containersByPort(runtimeByPort)
+        let uniqueContainers = Dictionary(containers.values.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let usages = sampleContainers(Array(uniqueContainers.values), now: now)
 
         for socket in sockets.listening {
+            if socket.port >= config.minPort, socket.port <= config.maxPort, runtimeByPort[socket.port] != nil {
+                // A runtime port with no container behind it is the runtime's own.
+                guard let container = containers[socket.port] else { continue }
+                liveContainers.insert(container.id)
+                let server = containerServer(socket: socket, container: container, usage: usages[container.id],
+                                             sockets: sockets, config: config, now: now)
+                seenKeys.insert(Self.key(port: socket.port, container: container))
+                servers.append(server)
+                continue
+            }
             guard socket.port >= config.minPort, socket.port <= config.maxPort,
                   Self.isAllowed(socket.command, allowlist: config.allowlist),
                   let listener = processes[socket.pid] else { continue }
@@ -163,9 +194,118 @@ final class ScanEngine: @unchecked Sendable {
         histories = histories.filter { seenKeys.contains($0.key) }
         lastActive = lastActive.filter { seenKeys.contains($0.key) }
         previousCPU = previousCPU.filter { livePids.contains($0.key) }
+        previousContainerCPU = previousContainerCPU.filter { liveContainers.contains($0.key) }
+        containerStarts = containerStarts.filter { liveContainers.contains($0.key) }
         argsCache = argsCache.filter { processes[$0.key] != nil }
         return servers
     }
+
+    // MARK: - Containers
+
+    private func runtime(of process: ProcSnapshot) -> ContainerRuntime? {
+        guard let path = args(for: process)?.executablePath else { return nil }
+        return ContainerRuntime.owning(executablePath: path)
+    }
+
+    /// One engine query per runtime per scan, only when that runtime holds a port.
+    private func containersByPort(_ runtimeByPort: [Int: ContainerRuntime]) -> [Int: ContainerInfo] {
+        var result: [Int: ContainerInfo] = [:]
+        for runtime in Set(runtimeByPort.values) {
+            for container in inspector.containers(runtime) ?? [] {
+                for port in container.publishedPorts where runtimeByPort[port] == runtime {
+                    result[port] = container
+                }
+            }
+        }
+        return result
+    }
+
+    /// Memory and CPU per container, sampled once per scan even when a
+    /// container publishes several ports. CPU is the change in the cgroup's
+    /// CPU time since the last scan, like a process's.
+    private func sampleContainers(_ containers: [ContainerInfo], now: Date) -> [String: (memory: UInt64, cpu: Double)] {
+        var fetched = [ContainerUsage?](repeating: nil, count: containers.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: containers.count) { index in
+            let usage = inspector.containerUsage(containers[index])
+            lock.withLock { fetched[index] = usage }
+        }
+        var result: [String: (memory: UInt64, cpu: Double)] = [:]
+        for (container, usage) in zip(containers, fetched) {
+            guard let usage else {
+                previousContainerCPU.removeValue(forKey: container.id)
+                result[container.id] = (0, 0)
+                continue
+            }
+            var cpu = 0.0
+            if let previous = previousContainerCPU[container.id] {
+                if usage.cpuNanoseconds >= previous.nanoseconds {
+                    let elapsed = now.timeIntervalSince(previous.at)
+                    if elapsed > 0 { cpu = Double(usage.cpuNanoseconds - previous.nanoseconds) / (elapsed * 1_000_000_000) * 100 }
+                } else {
+                    // The counter only goes back when the container restarted.
+                    containerStarts.removeValue(forKey: container.id)
+                }
+            }
+            previousContainerCPU[container.id] = (usage.cpuNanoseconds, now)
+            result[container.id] = (usage.memory, cpu)
+        }
+        return result
+    }
+
+    private func containerServer(socket: ListeningSocket, container: ContainerInfo, usage: (memory: UInt64, cpu: Double)?,
+                                 sockets: SocketScan, config: ScanConfig, now: Date) -> Server {
+        let cwd = container.workingDirectory
+        var project = cwd.map { projects.resolve(cwd: $0, command: nil) } ?? ProjectInfo(name: container.name)
+        project.name = container.name
+        project.framework = nil
+        if !config.showBranches { project.branch = nil }
+
+        if containerStarts[container.id] == nil, let started = inspector.containerStart(container) {
+            containerStarts[container.id] = started
+        }
+
+        let memory = usage?.memory ?? 0
+        let cpu = usage?.cpu ?? 0
+        let key = Self.key(port: socket.port, container: container)
+        let connections = sockets.inboundConnections[socket.port] ?? 0
+        if cpu >= 2 || connections > 0 || lastActive[key] == nil {
+            lastActive[key] = now
+        }
+        var history = histories[key] ?? []
+        history.append(Sample(time: now, memory: memory, cpu: cpu))
+        history.removeAll { now.timeIntervalSince($0.time) > Self.historyWindow }
+        histories[key] = history
+
+        return Server(
+            port: socket.port,
+            pid: socket.pid,
+            rootPid: socket.pid,
+            processName: socket.command,
+            addresses: socket.addresses,
+            cwd: cwd,
+            cwdExists: cwd.map { FileManager.default.fileExists(atPath: $0) } ?? true,
+            command: nil,
+            launch: nil,
+            launchDirectory: nil,
+            startedAt: containerStarts[container.id],
+            project: project,
+            conductorWorkspace: nil,
+            paneWorkspace: nil,
+            agent: nil,
+            container: container,
+            processes: [],
+            processStarts: [:],
+            memory: memory,
+            cpu: cpu,
+            connections: connections,
+            history: history,
+            lastActive: lastActive[key] ?? now,
+            isProtected: container.isProtected(by: config.protected)
+        )
+    }
+
+    private static func key(port: Int, container: ContainerInfo) -> String { "\(port)-\(container.id)" }
 
     // MARK: - Process tree
 

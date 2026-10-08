@@ -64,6 +64,10 @@ struct Server: Identifiable {
     var conductorWorkspace: String?
     var paneWorkspace: PaneWorkspace?
     var agent: AgentSession?
+    /// Set when the port is published by a Docker or OrbStack container. The
+    /// listening pid is then the runtime's helper, which must never be signalled:
+    /// `processes` and `processStarts` stay empty and Stop goes to the container.
+    var container: ContainerInfo? = nil
     var processes: [ServerProcess]
     /// Identity of every process in the tree, so we never signal a reused pid.
     var processStarts: [pid_t: Date]
@@ -76,6 +80,13 @@ struct Server: Identifiable {
 
     var id: Int { port }
     var url: URL { URL(string: "http://localhost:\(port)")! }
+
+    /// The name a list row leads with: the branch, or for containers the
+    /// container's own name, since a compose project's services share a branch.
+    var listTitle: String {
+        if container != nil { return project.name }
+        return project.branch ?? project.name
+    }
 
     var uptime: TimeInterval? { startedAt.map { Date().timeIntervalSince($0) } }
     var idleFor: TimeInterval { Date().timeIntervalSince(lastActive) }

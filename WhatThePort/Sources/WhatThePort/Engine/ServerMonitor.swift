@@ -86,7 +86,8 @@ final class ServerMonitor: ObservableObject {
                    linkCodex: defaults.bool(forKey: Preferences.linkCodex),
                    linkConductor: defaults.bool(forKey: Preferences.linkConductor),
                    linkPane: defaults.bool(forKey: Preferences.linkPane),
-                   showBranches: defaults.bool(forKey: Preferences.showBranches))
+                   showBranches: defaults.bool(forKey: Preferences.showBranches),
+                   showContainers: defaults.bool(forKey: Preferences.showContainers))
     }
 
     // MARK: - Scanning
@@ -124,7 +125,7 @@ final class ServerMonitor: ObservableObject {
             let result = engine.scan(config)
             let system = ProcessInspector.systemMemory()
             let cpu = cpuSampler.sample()
-            let apps = appUsage.scan(excluding: Set(result.flatMap { $0.processStarts.keys }))
+            let apps = AppUsageScanner.excludingContainers(appUsage.scan(excluding: Set(result.flatMap { $0.processStarts.keys })), servers: result)
             Task { @MainActor in
                 self.servers = result
                 self.systemMemory = system
@@ -149,7 +150,7 @@ final class ServerMonitor: ObservableObject {
         systemMemory = ProcessInspector.systemMemory()
         if let cpu = queue.sync(execute: { cpuSampler.sample() }) { systemCPU = cpu }
         let excluded = Set(servers.flatMap { $0.processStarts.keys })
-        otherApps = queue.sync { appUsage.scan(excluding: excluded) }
+        otherApps = AppUsageScanner.excludingContainers(queue.sync { appUsage.scan(excluding: excluded) }, servers: servers)
         hasScanned = true
     }
 
@@ -217,13 +218,27 @@ final class ServerMonitor: ObservableObject {
 
     // MARK: - Actions
 
+    /// Containers stop through their runtime, never by signalling its helper.
     func stop(_ server: Server) {
-        ProcessControl.stop(server) { [weak self] in self?.scan() }
+        if let container = server.container {
+            DockerEngine.stop(container) { [weak self] _ in self?.scan() }
+        } else {
+            ProcessControl.stop(server) { [weak self] in self?.scan() }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.scan() }
     }
 
     func restart(_ server: Server) {
-        ProcessControl.restart(server) { [weak self] _ in self?.scan() }
+        if let container = server.container {
+            DockerEngine.restart(container) { [weak self] _ in self?.scan() }
+        } else {
+            ProcessControl.restart(server) { [weak self] _ in self?.scan() }
+        }
+    }
+
+    /// Restart reruns the launch command, or for containers asks the runtime.
+    func canRestart(_ server: Server) -> Bool {
+        server.container != nil || (server.launch != nil && server.cwdExists)
     }
 
     // MARK: - Ports and processes

@@ -9,6 +9,9 @@ struct ScanEngineTests {
         var usages: [pid_t: ProcUsage] = [:]
         var arguments: [pid_t: ProcArgs] = [:]
         var reads: [pid_t: Int] = [:]
+        var containers: [ContainerRuntime: [ContainerInfo]] = [:]
+        var containerUsages: [String: ContainerUsage] = [:]
+        var containerQueries = 0
         let epoch = Date(timeIntervalSince1970: 1_700_000_000)
         var config = ScanConfig(minPort: 3000, maxPort: 9999, allowlist: ["node", "Python", "python3"],
                                 linkClaude: false, linkCodex: false, linkConductor: false, showBranches: false)
@@ -18,8 +21,31 @@ struct ScanEngineTests {
                 return usages[pid]
             },
             arguments: { [unowned self] in arguments[$0] },
-            currentDirectory: { _ in NSTemporaryDirectory() }
+            currentDirectory: { _ in NSTemporaryDirectory() },
+            containers: { [unowned self] runtime in
+                containerQueries += 1
+                return containers[runtime]
+            },
+            containerUsage: { [unowned self] in containerUsages[$0.id] },
+            containerStart: { [unowned self] _ in epoch }
         ))
+
+        /// OrbStack's helper, which holds every published container port.
+        func orbStackHelper(_ pid: pid_t, memory: UInt64 = 4_000_000_000) {
+            processes[pid] = ProcSnapshot(pid: pid, ppid: 1, comm: "OrbStack Helper", startTime: epoch)
+            usages[pid] = ProcUsage(footprint: memory, cpuNanoseconds: 0)
+            arguments[pid] = ProcArgs(executablePath: "/Applications/OrbStack.app/Contents/Frameworks/OrbStack Helper.app/Contents/MacOS/OrbStack Helper",
+                                      arguments: ["OrbStack Helper", "vmgr"], environment: [:])
+        }
+
+        func container(_ name: String, image: String, ports: Set<Int>, memory: UInt64 = 0, cpu: UInt64 = 0,
+                       runtime: ContainerRuntime = .orbStack, service: String? = nil) {
+            let info = ContainerInfo(id: name + "-id", name: name, image: image, runtime: runtime, publishedPorts: ports,
+                                     composeProject: service == nil ? nil : "shop", composeService: service,
+                                     workingDirectory: service == nil ? nil : NSTemporaryDirectory())
+            containers[runtime, default: []].append(info)
+            containerUsages[info.id] = ContainerUsage(memory: memory, cpuNanoseconds: cpu)
+        }
 
         func process(_ pid: pid_t, parent: pid_t = 1, name: String = "node", memory: UInt64 = 100) {
             processes[pid] = ProcSnapshot(pid: pid, ppid: parent, comm: name, startTime: epoch)
@@ -217,6 +243,66 @@ struct ScanEngineTests {
         #expect(ScanEngine.isEmbeddedAppExecutable("/Applications/Python.app/Contents/MacOS/Python"))
         #expect(!ScanEngine.isEmbeddedAppExecutable("/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python"))
         #expect(!ScanEngine.isEmbeddedAppExecutable("/project/.venv/bin/python3.12"))
+    }
+
+    @Test func containerPortsBelongToTheirContainerNeverTheRuntime() {
+        let f = Fixture()
+        f.orbStackHelper(500)
+        f.listen(500, port: 5432)
+        f.listen(500, port: 6379)
+        f.listen(500, port: 8222) // the runtime's own port, with no container behind it
+        f.container("shop-db-1", image: "postgres:16-alpine", ports: [5432], memory: 300, service: "db")
+        f.container("cache", image: "redis:7-alpine", ports: [6379], memory: 50)
+        let rows = f.scan()
+        #expect(rows.map(\.port) == [5432, 6379])
+        #expect(rows.map { $0.container?.name } == ["shop-db-1", "cache"])
+        #expect(rows.map(\.memory) == [300, 50])
+        #expect(rows.allSatisfy { $0.processStarts.isEmpty && $0.processes.isEmpty })
+        #expect(rows.map(\.listTitle) == ["shop-db-1", "cache"])
+        #expect(rows[0].cwd == NSTemporaryDirectory())
+        #expect(rows.allSatisfy { $0.isProtected }, "postgres and redis images match the default protected list")
+        #expect(f.containerQueries == 1, "One engine query per runtime per scan")
+    }
+
+    @Test func containerCPUComesFromCgroupTimeAndPortsShareOneContainer() {
+        let f = Fixture()
+        f.orbStackHelper(500)
+        f.listen(500, port: 8000)
+        f.listen(500, port: 8001)
+        f.container("api", image: "ghcr.io/acme/api:1.2", ports: [8000, 8001], memory: 400, cpu: 0)
+        _ = f.scan()
+        f.containerUsages["api-id"] = ContainerUsage(memory: 400, cpuNanoseconds: 1_000_000_000)
+        let rows = f.scan(after: 2)
+        #expect(rows.map(\.cpu) == [50, 50])
+        #expect(!rows[0].isProtected)
+        let resources = ServerResources(rows)
+        #expect(resources.memory == 400)
+        #expect(resources.memoryByPort == [8000: 200, 8001: 200])
+    }
+
+    @Test func turningContainersOffHidesTheRuntimeHelper() {
+        let f = Fixture()
+        f.orbStackHelper(500)
+        f.listen(500, port: 5432)
+        f.container("db", image: "postgres", ports: [5432])
+        f.config.showContainers = false
+        f.config.allowlist.insert("OrbStack Helper")
+        #expect(f.scan().isEmpty)
+        #expect(f.containerQueries == 0)
+    }
+
+    @Test func runtimeAppMemoryExcludesItsContainers() {
+        let f = Fixture()
+        f.orbStackHelper(500)
+        f.listen(500, port: 5432)
+        f.listen(500, port: 5433)
+        f.container("db", image: "postgres", ports: [5432, 5433], memory: 300)
+        let rows = f.scan()
+        let apps = [AppMemory(id: "/Applications/OrbStack.app", name: "OrbStack", bundlePath: "/Applications/OrbStack.app", agent: nil, memory: 1000),
+                    AppMemory(id: "/Applications/Safari.app", name: "Safari", bundlePath: "/Applications/Safari.app", agent: nil, memory: 800)]
+        let adjusted = AppUsageScanner.excludingContainers(apps, servers: rows)
+        #expect(adjusted.map(\.name) == ["Safari", "OrbStack"])
+        #expect(adjusted.map(\.memory) == [800, 700])
     }
 
     @Test func versionedPythonNamesRespectUserAllowlist() {

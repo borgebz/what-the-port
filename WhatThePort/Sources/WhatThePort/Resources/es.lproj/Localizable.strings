@@ -77,9 +77,12 @@
 "Colon + count" = "Dos puntos + cantidad";
 "Command" = "Comando";
 "Confirmed" = "Confirmado";
+"Container" = "Contenedor";
+"Containers" = "Contenedores";
 "Continue" = "Continuar";
 "Copy URL" = "Copiar URL";
 "Copy command" = "Copiar comando";
+"Copy container ID" = "Copiar ID del contenedor";
 "Copy session ID" = "Copiar ID de sesión";
 "Couldn’t add the login item. Try again or check System Settings." = "No se pudo añadir el elemento de inicio. Inténtalo de nuevo o revisa Ajustes del Sistema.";
 "Couldn’t request notifications. Try again or check System Settings." = "No se pudieron solicitar notificaciones. Inténtalo de nuevo o revisa Ajustes del Sistema.";
@@ -114,6 +117,7 @@
 "Have been running for" = "Llevan en ejecución";
 "Help shape WhatThePort" = "Ayuda a mejorar WhatThePort";
 "Idle %@ · no connections" = "Inactivo %@ · sin conexiones";
+"Image" = "Imagen";
 "Installed" = "Instalado";
 "Installs when you quit. Some updates may ask to restart the app." = "Se instala al salir. Algunas actualizaciones pueden pedir reiniciar la aplicación.";
 "Install…" = "Instalar…";
@@ -186,6 +190,7 @@
 "Report a bug" = "Informar de un error";
 "Reset to defaults" = "Restablecer valores predeterminados";
 "Restart WhatThePort to apply the language change." = "Reinicia WhatThePort para aplicar el idioma.";
+"Restart container" = "Reiniciar contenedor";
 "Restart with the same command" = "Reiniciar con el mismo comando";
 "Restart. It will run outside the %@ session." = "Reiniciar. Se ejecutará fuera de la sesión de %@.";
 "Resume in %@" = "Reanudar en %@";
@@ -215,6 +220,7 @@
 "Share which features you use, once a day. Nothing about your servers, projects or Mac is included." = "Comparte las funciones que usas una vez al día. Sin datos sobre tus servidores, proyectos ni Mac.";
 "Show branch names" = "Mostrar nombres de ramas";
 "Show popover with ⌥⌘P" = "Mostrar la ventana con ⌥⌘P";
+"Show ports published by containers. Stop and restart act on the container, not the app." = "Mostrar los puertos publicados por contenedores. Detener y reiniciar actúan sobre el contenedor, no sobre la app.";
 "Show preview buttons" = "Mostrar botones de vista previa";
 "Show the pull request for each branch" = "Mostrar la pull request de cada rama";
 "Show transcript" = "Mostrar transcripción";
@@ -228,6 +234,7 @@
 "Stop" = "Detener";
 "Stop %d %@ · free %@" = "Detener %d %@ · liberar %@";
 "Stop %d processes" = "Detener %d procesos";
+"Stop container" = "Detener contenedor";
 "Stop servers" = "Detener servidores";
 "Stopped %@" = "%@ detenido";
 "Stopping" = "Deteniendo";
