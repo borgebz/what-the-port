@@ -79,6 +79,9 @@ struct Server: Identifiable {
     var isProtected: Bool
 
     var id: Int { port }
+    /// Which server this is across scans, for alerts and Clean up. Containers
+    /// share their runtime helper's pid, so they're told apart by container id.
+    var identityKey: String { "\(port)-\(container?.id ?? String(rootPid))" }
     var url: URL { URL(string: "http://localhost:\(port)")! }
 
     /// The name a list row leads with: the branch, or for containers the

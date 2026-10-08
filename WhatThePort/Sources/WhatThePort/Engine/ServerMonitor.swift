@@ -214,7 +214,7 @@ final class ServerMonitor: ObservableObject {
         }
     }
 
-    private func key(for server: Server) -> String { "\(server.port)-\(server.rootPid)" }
+    private func key(for server: Server) -> String { server.identityKey }
 
     // MARK: - Actions
 

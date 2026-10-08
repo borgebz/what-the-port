@@ -280,6 +280,23 @@ struct ScanEngineTests {
         #expect(resources.memoryByPort == [8000: 200, 8001: 200])
     }
 
+    @Test func containersOnOnePortKeepSeparateIdentities() {
+        let f = Fixture()
+        f.orbStackHelper(500)
+        f.listen(500, port: 5432)
+        f.container("old-db", image: "postgres", ports: [5432])
+        let before = f.scan()
+        f.containers = [:]
+        f.container("new-db", image: "postgres", ports: [5432])
+        let after = f.scan(after: 2)
+        #expect(before[0].rootPid == after[0].rootPid, "Both rows sit behind the same helper")
+        #expect(before[0].identityKey != after[0].identityKey)
+        #expect(after[0].history.count == 1, "The replacement starts its own history")
+        f.process(20)
+        f.listen(20, port: 3000)
+        #expect(f.scan(after: 4).first { $0.port == 3000 }?.identityKey == "3000-20")
+    }
+
     @Test func turningContainersOffHidesTheRuntimeHelper() {
         let f = Fixture()
         f.orbStackHelper(500)
