@@ -52,6 +52,7 @@ The prebuilt download is for **Apple Silicon Macs running macOS 14 or later**. T
 - **Leak detection** - Servers over 2 GB, or growing fast, turn amber in the list and the menu bar
 - **Clean up** - Find servers from deleted worktrees or that have gone idle, and stop them in bulk
 - **Stop and restart** - Stops the server’s own process tree; restart reruns the original command in the same folder
+- **Docker and OrbStack containers** - Published container ports get their own rows, with the compose folder’s branch and the container’s memory and CPU. Stop and restart go to the container, never to Docker or OrbStack itself
 - **Alerts** - Notifications with Details, Stop and Snooze when a server passes your memory threshold or starts leaking
 - **Automatic clean up (optional)** - Off, Ask or Automatic; leaking servers are never stopped automatically
 - **Previews and pull requests (optional)** - A Vercel preview button and the branch's pull request, via the GitHub CLI you're already signed in to
@@ -111,12 +112,14 @@ Open Settings from the gear in the popover (⌘,):
 - **Alerts** - Memory threshold, leak warnings, snooze length, start/stop notifications
 - **Clean up** - Off / Ask / Automatic, what counts as idle or stale, protected processes, force-quit delay
 - **Ports & processes** - Port range and which processes count as dev servers
-- **Integrations** - Claude Code, Codex, Conductor and Pane session links, branch names, Vercel previews and pull requests
+- **Integrations** - Claude Code, Codex, Conductor and Pane session links, branch names, Docker and OrbStack containers, Vercel previews and pull requests
 - **About** - Version, update controls, bug reports or feature requests as GitHub issues with your app and macOS versions filled in, and a tip jar
 
 ## How It Works
 
 WhatThePort reads listening TCP sockets with `lsof`, then inspects each server's process tree directly through `libproc` and `sysctl`: memory footprint, CPU time, working directory, arguments and environment. From the working directory it finds the project manifest, framework and git branch. Session links come from environment variables that Claude Code and Conductor pass to the commands they run, and from Codex's session files. It rescans every 2 seconds. In monorepos, sibling servers stay separate from their shared task runner. When one process serves several ports, each row shows its server’s usage; totals count each process once, and the memory bar divides shared usage between those ports. Stopping or restarting that process affects all ports it serves.
+
+Docker Desktop and OrbStack publish container ports from their own helper process. WhatThePort asks the runtime’s local Docker Engine socket which container owns each of those ports, and reads the container’s memory and CPU from it, so a container row never counts or stops the helper. Stop and restart use the same socket, like `docker stop` and `docker restart`.
 
 ## Privacy
 
