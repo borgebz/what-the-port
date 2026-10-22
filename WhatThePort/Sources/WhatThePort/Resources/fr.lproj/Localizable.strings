@@ -174,6 +174,7 @@
 "Pick servers to stop" = "Choisissez les serveurs à arrêter";
 "Ports" = "Ports";
 "Ports & processes" = "Ports et processus";
+"Ports published by Docker Desktop, OrbStack, Colima and Rancher Desktop containers. Stop and restart act on the container, not the runtime." = "Ports publiés par les conteneurs de Docker Desktop, OrbStack, Colima et Rancher Desktop. Arrêter et redémarrer agissent sur le conteneur, pas sur l’environnement d’exécution.";
 "Preview" = "Aperçu";
 "Preview build failed · %@" = "Échec de compilation de l’aperçu · %@";
 "Preview button for each branch, from Vercel's GitHub deployments" = "Bouton d’aperçu par branche, via les déploiements GitHub de Vercel";
@@ -219,8 +220,8 @@
 "Share anonymous usage" = "Partager l’utilisation anonyme";
 "Share which features you use, once a day. Nothing about your servers, projects or Mac is included." = "Partagez les fonctions utilisées une fois par jour. Aucune information sur vos serveurs, projets ou Mac.";
 "Show branch names" = "Afficher les noms des branches";
+"Show containers" = "Afficher les conteneurs";
 "Show popover with ⌥⌘P" = "Afficher la fenêtre avec ⌥⌘P";
-"Show ports published by containers. Stop and restart act on the container, not the app." = "Afficher les ports publiés par les conteneurs. Arrêter et redémarrer agissent sur le conteneur, pas sur l’application.";
 "Show preview buttons" = "Afficher les boutons d’aperçu";
 "Show the pull request for each branch" = "Afficher la pull request de chaque branche";
 "Show transcript" = "Afficher la transcription";

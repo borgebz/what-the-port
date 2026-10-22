@@ -174,6 +174,7 @@
 "Pick servers to stop" = "Server zum Stoppen auswählen";
 "Ports" = "Ports";
 "Ports & processes" = "Ports & Prozesse";
+"Ports published by Docker Desktop, OrbStack, Colima and Rancher Desktop containers. Stop and restart act on the container, not the runtime." = "Von Containern in Docker Desktop, OrbStack, Colima und Rancher Desktop veröffentlichte Ports. Stoppen und Neustarten betreffen den Container, nicht die Laufzeitumgebung.";
 "Preview" = "Vorschau";
 "Preview build failed · %@" = "Vorschau-Build fehlgeschlagen · %@";
 "Preview button for each branch, from Vercel's GitHub deployments" = "Vorschau je Branch aus Vercels GitHub-Deployments";
@@ -219,8 +220,8 @@
 "Share anonymous usage" = "Anonyme Nutzungsdaten teilen";
 "Share which features you use, once a day. Nothing about your servers, projects or Mac is included." = "Einmal täglich verwendete Funktionen teilen. Keine Daten zu Servern, Projekten oder deinem Mac.";
 "Show branch names" = "Branch-Namen anzeigen";
+"Show containers" = "Container anzeigen";
 "Show popover with ⌥⌘P" = "Popover mit ⌥⌘P öffnen";
-"Show ports published by containers. Stop and restart act on the container, not the app." = "Von Containern veröffentlichte Ports anzeigen. Stoppen und Neustarten betreffen den Container, nicht die App.";
 "Show preview buttons" = "Vorschauschaltflächen anzeigen";
 "Show the pull request for each branch" = "Pull Request für jeden Branch anzeigen";
 "Show transcript" = "Transkript anzeigen";

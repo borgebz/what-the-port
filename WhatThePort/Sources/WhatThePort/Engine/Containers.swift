@@ -1,29 +1,51 @@
 import Darwin
 import Foundation
 
-/// A desktop app that publishes container ports on the Mac. Its helper process
-/// holds every published port, so the port's real owner is the container,
-/// and stopping that helper would take every container down with it.
-enum ContainerRuntime: String, CaseIterable {
-    case orbStack = "OrbStack"
-    case docker = "Docker"
+/// A container runtime on this Mac: a helper process that holds the ports
+/// containers publish, and the Docker Engine API socket that knows which
+/// container owns each port. Stopping the helper would take every container
+/// down with it, so container rows never signal it.
+struct ContainerRuntime: Hashable {
+    /// Shown on container rows: OrbStack, Docker, Colima, Rancher Desktop.
+    let name: String
+    let socketPath: String
+    /// The app whose own memory already includes its containers' VM.
+    var appBundle: String?
 
-    /// Recognised by the listener's executable, since the kernel truncates long
-    /// process names like `com.docker.backend`.
-    static func owning(executablePath path: String) -> ContainerRuntime? {
-        if path.contains("/OrbStack.app/") { return .orbStack }
-        if path.contains("/Docker.app/") { return .docker }
+    static func orbStack(home: String = Self.home) -> ContainerRuntime {
+        ContainerRuntime(name: "OrbStack", socketPath: home + "/.orbstack/run/docker.sock", appBundle: "OrbStack.app")
+    }
+
+    static func dockerDesktop(home: String = Self.home) -> ContainerRuntime {
+        ContainerRuntime(name: "Docker", socketPath: home + "/.docker/run/docker.sock", appBundle: "Docker.app")
+    }
+
+    /// Recognises a runtime's port helper. OrbStack and Docker Desktop are found
+    /// by executable, since the kernel truncates names like `com.docker.backend`.
+    /// Colima and Rancher Desktop forward ports through Lima, with `ssh` or
+    /// `limactl hostagent` processes whose arguments name the Lima instance;
+    /// a plain `ssh` tunnel never matches.
+    static func owning(executablePath path: String, arguments: [String], home: String = Self.home) -> ContainerRuntime? {
+        if path.contains("/OrbStack.app/") { return .orbStack(home: home) }
+        if path.contains("/Docker.app/") { return .dockerDesktop(home: home) }
+        let tool = (path as NSString).lastPathComponent
+        guard tool == "ssh" || tool == "limactl" else { return nil }
+        let joined = arguments.joined(separator: " ")
+        if let range = joined.range(of: "/.colima/_lima/") {
+            // Lima instance `colima` is Colima's default profile, `colima-work` is profile `work`.
+            let instance = joined[range.upperBound...].prefix { $0 != "/" && $0 != " " }
+            let profile = instance == "colima" ? "default" : String(instance.dropFirst("colima-".count))
+            guard instance.hasPrefix("colima"), !profile.isEmpty else { return nil }
+            let name = profile == "default" ? "Colima" : "Colima \(profile)"
+            return ContainerRuntime(name: name, socketPath: home + "/.colima/\(profile)/docker.sock")
+        }
+        if joined.contains("/rancher-desktop/lima/") {
+            return ContainerRuntime(name: "Rancher Desktop", socketPath: home + "/.rd/docker.sock")
+        }
         return nil
     }
 
-    /// The Docker Engine API socket each app serves for its own containers.
-    var socketPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        switch self {
-        case .orbStack: return home + "/.orbstack/run/docker.sock"
-        case .docker: return home + "/.docker/run/docker.sock"
-        }
-    }
+    static let home = FileManager.default.homeDirectoryForCurrentUser.path
 }
 
 /// A running container with at least one TCP port published on the Mac.
@@ -35,7 +57,8 @@ struct ContainerInfo: Equatable {
     let publishedPorts: Set<Int>
     var composeProject: String?
     var composeService: String?
-    /// The folder `docker compose` ran in, from the container's labels.
+    /// The folder `docker compose` ran in, from the container's labels. It can
+    /// be a path inside a Linux VM that doesn't exist on the Mac.
     var workingDirectory: String?
 
     var shortID: String { String(id.prefix(12)) }
@@ -47,12 +70,19 @@ struct ContainerInfo: Equatable {
         return last.split(separator: ":").first.map(String.init) ?? last
     }
 
-    /// Matches the protected process list against what the image runs, so
-    /// `postgres`, `redis` (`redis-server`) and `mongo` (`mongod`) containers
-    /// are protected like the native servers.
+    /// Image names that hold data, matched anywhere in the image's repository
+    /// so `pgvector/pgvector`, `postgis/postgis`, `bitnami/postgresql` and
+    /// `redis/redis-stack` count too.
+    static let dataStores = ["postgres", "postgis", "pgvector", "timescale", "redis", "valkey", "keydb",
+                             "mysql", "mariadb", "mongo", "mssql", "couchdb", "cassandra", "clickhouse", "neo4j"]
+
+    /// Databases are protected from Clean up, like the native ones. An image
+    /// whose name is on the protected process list counts too.
     func isProtected(by names: Set<String>) -> Bool {
-        let base = imageName.lowercased()
-        return [base, base + "-server", base + "d"].contains(where: names.contains)
+        let repository = (image.split(separator: "@").first.map(String.init) ?? image)
+            .split(separator: "/").map { $0.split(separator: ":").first.map(String.init) ?? String($0) }
+            .joined(separator: "/").lowercased()
+        return Self.dataStores.contains(where: repository.contains) || names.contains(imageName.lowercased())
     }
 }
 
@@ -144,20 +174,41 @@ enum DockerEngine {
 
     /// Returns the response body for a 2xx status, otherwise nil.
     static func request(_ method: String, _ path: String, runtime: ContainerRuntime, timeout: Int = 2) -> Data? {
-        let socketPath = runtime.socketPath
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = send(method, path, runtime: runtime, timeout: timeout)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
-        var time = timeval(tv_sec: timeout, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &time, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &time, socklen_t(MemoryLayout<timeval>.size))
+        var response = Data()
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            let count = recv(fd, &buffer, buffer.count, 0)
+            if count <= 0 { break }
+            response.append(buffer, count: count)
+        }
+        return parseResponse(response)
+    }
+
+    /// Opens a long-lived GET, such as the event stream, with no read timeout.
+    /// The caller reads it and closes the returned socket.
+    static func openStream(_ path: String, runtime: ContainerRuntime) -> Int32 {
+        send("GET", path, runtime: runtime, timeout: 2, readTimeout: 0)
+    }
+
+    /// Connects to the runtime's socket and sends an HTTP/1.0 request, so the
+    /// engine answers without chunking and closes when it's done.
+    private static func send(_ method: String, _ path: String, runtime: ContainerRuntime, timeout: Int, readTimeout: Int? = nil) -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return -1 }
+        var sendTime = timeval(tv_sec: timeout, tv_usec: 0)
+        var readTime = timeval(tv_sec: readTimeout ?? timeout, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &readTime, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sendTime, socklen_t(MemoryLayout<timeval>.size))
         var noSigPipe: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(socketPath.utf8)
-        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return nil }
+        let pathBytes = Array(runtime.socketPath.utf8)
+        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else { close(fd); return -1 }
         withUnsafeMutableBytes(of: &address.sun_path) { buffer in
             buffer.copyBytes(from: pathBytes)
             buffer[pathBytes.count] = 0
@@ -167,20 +218,21 @@ enum DockerEngine {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard connected == 0 else { return nil }
-
         let message = "\(method) \(path) HTTP/1.0\r\nHost: docker\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        let sent = message.utf8CString.withUnsafeBufferPointer { send(fd, $0.baseAddress, $0.count - 1, 0) }
-        guard sent == message.utf8.count else { return nil }
+        let sent = connected == 0 ? message.utf8CString.withUnsafeBufferPointer { Darwin.send(fd, $0.baseAddress, $0.count - 1, 0) } : -1
+        guard sent == message.utf8.count else { close(fd); return -1 }
+        return fd
+    }
 
-        var response = Data()
-        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
-        while true {
-            let count = recv(fd, &buffer, buffer.count, 0)
-            if count <= 0 { break }
-            response.append(buffer, count: count)
-        }
-        return parseResponse(response)
+    /// Container events that change which containers are running.
+    static let listChangingActions: Set<String> = ["start", "restart", "die", "stop", "kill", "destroy", "pause", "unpause"]
+
+    static func parseEvent(_ line: Data) -> (action: String, id: String, time: Date)? {
+        guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let action = json["Action"] as? String ?? json["status"] as? String,
+              let id = (json["Actor"] as? [String: Any])?["ID"] as? String ?? json["id"] as? String else { return nil }
+        let time = (json["time"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? Date()
+        return (action, id, time)
     }
 
     static func parseResponse(_ response: Data) -> Data? {

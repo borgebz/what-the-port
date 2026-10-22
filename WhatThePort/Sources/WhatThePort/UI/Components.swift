@@ -167,8 +167,7 @@ struct PillButtonStyle: ButtonStyle {
     }
 }
 
-/// Small monochrome marks for the agent that started a server.
-/// Marks a port published by a Docker or OrbStack container.
+/// Marks a port published by a container.
 struct ContainerGlyph: View {
     var size: CGFloat = 12
     var color: Color = Theme.text1.opacity(0.75)
@@ -181,6 +180,7 @@ struct ContainerGlyph: View {
     }
 }
 
+/// Small monochrome marks for the agent that started a server.
 struct AgentGlyph: View {
     let kind: AgentKind
     var size: CGFloat = 12

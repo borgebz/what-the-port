@@ -81,6 +81,7 @@ final class TerminalApp {
 
     private func start() {
         monitor.handlesAlerts = false
+        monitor.isWatched = true
         activeScreen = screen
         atexit { activeScreen?.leave() }
         screen.enter()
@@ -786,8 +787,12 @@ final class TerminalApp {
         if let agent = server.agent { line += [Span(agentGlyph(agent.kind), palette.text2), Span(" ")] }
         let text = contextText(server)
         if let container = server.container {
-            let parts = [container.runtime.rawValue, server.project.branch, text].compactMap { $0 }.filter { !$0.isEmpty }
-            line.append(Span(parts.joined(separator: " · "), palette.text2))
+            // Only the runtime and branch truncate, so the time stays visible.
+            let suffix = text.isEmpty ? "" : " · " + text
+            let available = max(width - line.width - TextWidth.of(suffix), 1)
+            let lead = [container.runtime.name, server.project.branch].compactMap { $0 }.joined(separator: " · ")
+            line.append(Span([Span(lead)].truncated(to: available).map(\.text).joined(), palette.text2))
+            line.append(Span(suffix, palette.text2))
         } else if server.cwdExists, server.project.branch != nil {
             let suffix = " · " + text
             let available = max(width - line.width - TextWidth.of(suffix), 1)
@@ -867,7 +872,7 @@ final class TerminalApp {
         let github = monitor.github.result(for: server)
         var primary: [Line] = []
         if let container = server.container {
-            primary.append(row("Container", [Span("\(container.runtime.rawValue) · \(container.name)", palette.text1)]))
+            primary.append(row("Container", [Span("\(container.runtime.name) · \(container.name)", palette.text1)]))
         }
         if let agent = server.agent {
             primary.append(row("Session", [Span(agentGlyph(agent.kind) + " ", palette.text1), Span(agent.title ?? agent.kind.rawValue, palette.text1), Span(" ↗", palette.text2)]))

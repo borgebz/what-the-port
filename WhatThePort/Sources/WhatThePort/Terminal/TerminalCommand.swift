@@ -91,6 +91,7 @@ enum TerminalCommand {
     @MainActor private static func list(json: Bool) -> Never {
         let monitor = ServerMonitor()
         monitor.handlesAlerts = false
+        monitor.isWatched = true
         // CPU is measured between two scans.
         monitor.scanNow()
         usleep(500_000)
@@ -175,7 +176,7 @@ enum TerminalCommand {
             // would stop every container, so scripts get the container instead.
             if let container = server.container {
                 var info: [String: Any] = ["id": container.id, "name": container.name, "image": container.image,
-                                           "runtime": container.runtime.rawValue]
+                                           "runtime": container.runtime.name]
                 info["composeProject"] = container.composeProject
                 info["composeService"] = container.composeService
                 object["container"] = info

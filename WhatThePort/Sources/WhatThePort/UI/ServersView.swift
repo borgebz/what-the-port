@@ -383,9 +383,13 @@ struct ServerRow: View {
             HStack(spacing: 5) {
                 if let agent = server.agent { AgentGlyph(kind: agent.kind, size: 10) }
                 if let container = server.container {
+                    // Like native rows, only the middle truncates; the time always shows.
                     ContainerGlyph(size: 10)
-                    Text(([container.runtime.rawValue, server.project.branch, contextText].compactMap { $0 }.filter { !$0.isEmpty }).joined(separator: " · "))
-                        .lineLimit(1)
+                    HStack(spacing: 3) {
+                        Text([container.runtime.name, server.project.branch].compactMap { $0 }.joined(separator: " · "))
+                            .lineLimit(1).truncationMode(.tail)
+                        if !contextText.isEmpty { Text("· " + contextText).fixedSize() }
+                    }
                 } else if server.cwdExists, server.project.branch != nil {
                     HStack(spacing: 3) {
                         Text(server.project.name.replacingOccurrences(of: "-", with: " "))

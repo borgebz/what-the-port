@@ -104,10 +104,10 @@ struct ServerDetailView: View {
     private var primaryRows: [InfoRow] {
         var rows: [InfoRow] = []
         if let container = server.container {
-            rows.append(InfoRow(label: L10n.text("Container"), tooltip: "\(container.runtime.rawValue) · \(container.name)") {
+            rows.append(InfoRow(label: L10n.text("Container"), tooltip: "\(container.runtime.name) · \(container.name)") {
                 HStack(spacing: 6) {
                     ContainerGlyph()
-                    Text("\(container.runtime.rawValue) · \(container.name)").font(Theme.body).foregroundStyle(Theme.text1)
+                    Text("\(container.runtime.name) · \(container.name)").font(Theme.body).foregroundStyle(Theme.text1)
                 }
             })
         }

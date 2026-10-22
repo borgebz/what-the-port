@@ -26,6 +26,18 @@ final class ServerMonitor: ObservableObject {
     /// notifications or automatic clean up.
     var handlesAlerts = true
 
+    /// Someone is looking at the servers: the popover is open, or `wtp` runs.
+    /// Container stats then follow the scan interval; otherwise every 5 seconds,
+    /// since each sample makes the engine read its VM's cgroups.
+    var isWatched = false {
+        didSet { updateContainerSampling() }
+    }
+
+    private func updateContainerSampling() {
+        let scanInterval = max(defaults.double(forKey: Preferences.scanInterval), 1)
+        engine.containerMonitor.setSampleInterval(isWatched ? scanInterval : max(scanInterval, 5))
+    }
+
     var minPort: Int = 3000
     var maxPort: Int = 65535
 
@@ -102,6 +114,7 @@ final class ServerMonitor: ObservableObject {
             .sink { [weak self] _ in
                 Task { @MainActor in
                     self?.scheduleTimer()
+                    self?.updateContainerSampling()
                     self?.objectWillChange.send()
                 }
             }
@@ -169,9 +182,21 @@ final class ServerMonitor: ObservableObject {
     func status(of server: Server) -> ServerStatus { server.status(alertThreshold: alertThreshold) }
 
     func cleanUpReason(for server: Server) -> CleanUpReason? {
-        guard !server.isProtected, cleanUpMode != .off else { return nil }
+        Self.cleanUpReason(for: server, mode: cleanUpMode, idleThreshold: idleThreshold, longRunningThreshold: longRunningThreshold,
+                           deletedWorktree: defaults.bool(forKey: Preferences.cleanUpDeletedWorktree))
+    }
+
+    nonisolated static func cleanUpReason(for server: Server, mode: Preferences.CleanUpMode, idleThreshold: TimeInterval,
+                              longRunningThreshold: TimeInterval, deletedWorktree: Bool) -> CleanUpReason? {
+        guard !server.isProtected, mode != .off else { return nil }
+        // A container's traffic can stay inside its compose network, where the
+        // Mac never sees it, so idle and uptime don't say it's unused. Only a
+        // leak is listed, and leaks are never preselected or stopped automatically.
+        if server.container != nil {
+            return server.isLeaking() ? .leaking(UInt64(max(server.memoryGrowth, 0))) : nil
+        }
         if !server.cwdExists {
-            return defaults.bool(forKey: Preferences.cleanUpDeletedWorktree) ? .worktreeDeleted : nil
+            return deletedWorktree ? .worktreeDeleted : nil
         }
         if server.idleFor >= idleThreshold { return .idle(server.idleFor) }
         if let uptime = server.uptime, uptime >= longRunningThreshold { return .longRunning(uptime) }
@@ -230,7 +255,11 @@ final class ServerMonitor: ObservableObject {
 
     func restart(_ server: Server) {
         if let container = server.container {
-            DockerEngine.restart(container) { [weak self] _ in self?.scan() }
+            engine.containerMonitor.forgetStart(of: container)
+            DockerEngine.restart(container) { [weak self] _ in
+                self?.engine.containerMonitor.forgetStart(of: container)
+                self?.scan()
+            }
         } else {
             ProcessControl.restart(server) { [weak self] _ in self?.scan() }
         }

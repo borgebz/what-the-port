@@ -37,16 +37,21 @@ final class ScanEngine: @unchecked Sendable {
         var usage: (pid_t) -> ProcUsage? = ProcessInspector.usage
         var arguments: (pid_t) -> ProcArgs? = ProcessInspector.arguments
         var currentDirectory: (pid_t) -> String? = ProcessInspector.currentDirectory
-        var containers: (ContainerRuntime) -> [ContainerInfo]? = DockerEngine.containers
-        var containerUsage: (ContainerInfo) -> ContainerUsage? = { DockerEngine.usage($0.id, runtime: $0.runtime) }
-        var containerStart: (ContainerInfo) -> Date? = { DockerEngine.startedAt($0.id, runtime: $0.runtime) }
+        /// Runtimes' containers and stats; tests supply snapshots, the app reads `containerMonitor`.
+        var containers: ((Set<ContainerRuntime>) -> [ContainerRuntime: RuntimeSnapshot])? = nil
     }
     private let inspector: Inspector
+    /// Talks to container engines off this queue; scans only read its latest state.
+    let containerMonitor = ContainerMonitor()
     init(inspector: Inspector = Inspector()) { self.inspector = inspector }
 
     private var previousCPU: [pid_t: (start: Date, nanoseconds: UInt64, at: Date)] = [:]
-    private var previousContainerCPU: [String: (nanoseconds: UInt64, at: Date)] = [:]
-    private var containerStarts: [String: Date] = [:]
+    /// Ports a runtime's helper holds for itself, like OrbStack's SSH server,
+    /// learned from a container list with nothing behind them. They don't keep
+    /// a runtime watched, so an engine with no published containers is left alone.
+    private var runtimeOwnPorts: [ContainerRuntime: Set<Int>] = [:]
+    /// The stats sample each container row last recorded, so history only grows with new samples.
+    private var recordedSample: [String: Date] = [:]
     private var histories: [String: [Sample]] = [:]
     private var lastActive: [String: Date] = [:]
     private var argsCache: [pid_t: (start: Date, args: ProcArgs?)] = [:]
@@ -63,10 +68,10 @@ final class ScanEngine: @unchecked Sendable {
         var servers: [Server] = []
         var seenKeys = Set<String>()
         var livePids = Set<pid_t>()
-        var liveContainers = Set<String>()
 
-        // Docker and OrbStack publish container ports from their own helper
-        // process, so these rows belong to containers, not to that helper.
+        // Container runtimes publish ports from their own helper process, so
+        // these rows belong to containers, not to that helper. Engines are
+        // only asked about runtimes whose helper holds a port right now.
         var runtimeByPort: [Int: ContainerRuntime] = [:]
         if config.showContainers {
             for socket in sockets.listening where socket.port >= config.minPort && socket.port <= config.maxPort {
@@ -75,17 +80,27 @@ final class ScanEngine: @unchecked Sendable {
                 }
             }
         }
-        let containers = containersByPort(runtimeByPort)
-        let uniqueContainers = Dictionary(containers.values.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let usages = sampleContainers(Array(uniqueContainers.values), now: now)
+        // Forget own ports the helper let go of, so a container can use them later.
+        for (runtime, ports) in runtimeOwnPorts {
+            runtimeOwnPorts[runtime] = ports.filter { runtimeByPort[$0] == runtime }
+        }
+        let wanted = Set(runtimeByPort.compactMap { port, runtime in
+            runtimeOwnPorts[runtime]?.contains(port) == true ? nil : runtime
+        })
+        let states = wanted.isEmpty ? [:] : inspector.containers?(wanted) ?? containerMonitor.snapshot(wanted, now: now)
+        let containers = Self.containersByPort(runtimeByPort, states: states)
+        for (runtime, state) in states where state.listedAt != nil {
+            let own = runtimeByPort.filter { $0.value == runtime && containers[$0.key] == nil }.keys
+            runtimeOwnPorts[runtime, default: []].formUnion(own)
+        }
 
         for socket in sockets.listening {
             if socket.port >= config.minPort, socket.port <= config.maxPort, runtimeByPort[socket.port] != nil {
                 // A runtime port with no container behind it is the runtime's own.
                 guard let container = containers[socket.port] else { continue }
-                liveContainers.insert(container.id)
-                let server = containerServer(socket: socket, container: container, usage: usages[container.id],
-                                             sockets: sockets, config: config, now: now)
+                let state = states[container.runtime]
+                let server = containerServer(socket: socket, container: container, sample: state?.samples[container.id],
+                                             startedAt: state?.startedAt[container.id], sockets: sockets, config: config, now: now)
                 seenKeys.insert(Self.key(port: socket.port, container: container))
                 servers.append(server)
                 continue
@@ -194,8 +209,7 @@ final class ScanEngine: @unchecked Sendable {
         histories = histories.filter { seenKeys.contains($0.key) }
         lastActive = lastActive.filter { seenKeys.contains($0.key) }
         previousCPU = previousCPU.filter { livePids.contains($0.key) }
-        previousContainerCPU = previousContainerCPU.filter { liveContainers.contains($0.key) }
-        containerStarts = containerStarts.filter { liveContainers.contains($0.key) }
+        recordedSample = recordedSample.filter { seenKeys.contains($0.key) }
         argsCache = argsCache.filter { processes[$0.key] != nil }
         return servers
     }
@@ -203,15 +217,16 @@ final class ScanEngine: @unchecked Sendable {
     // MARK: - Containers
 
     private func runtime(of process: ProcSnapshot) -> ContainerRuntime? {
-        guard let path = args(for: process)?.executablePath else { return nil }
-        return ContainerRuntime.owning(executablePath: path)
+        guard let args = args(for: process) else { return nil }
+        return ContainerRuntime.owning(executablePath: args.executablePath, arguments: args.arguments)
     }
 
-    /// One engine query per runtime per scan, only when that runtime holds a port.
-    private func containersByPort(_ runtimeByPort: [Int: ContainerRuntime]) -> [Int: ContainerInfo] {
+    /// Maps each helper-held port to the container of that runtime publishing it.
+    static func containersByPort(_ runtimeByPort: [Int: ContainerRuntime],
+                                 states: [ContainerRuntime: RuntimeSnapshot]) -> [Int: ContainerInfo] {
         var result: [Int: ContainerInfo] = [:]
-        for runtime in Set(runtimeByPort.values) {
-            for container in inspector.containers(runtime) ?? [] {
+        for (runtime, state) in states {
+            for container in state.containers {
                 for port in container.publishedPorts where runtimeByPort[port] == runtime {
                     result[port] = container
                 }
@@ -220,60 +235,30 @@ final class ScanEngine: @unchecked Sendable {
         return result
     }
 
-    /// Memory and CPU per container, sampled once per scan even when a
-    /// container publishes several ports. CPU is the change in the cgroup's
-    /// CPU time since the last scan, like a process's.
-    private func sampleContainers(_ containers: [ContainerInfo], now: Date) -> [String: (memory: UInt64, cpu: Double)] {
-        var fetched = [ContainerUsage?](repeating: nil, count: containers.count)
-        let lock = NSLock()
-        DispatchQueue.concurrentPerform(iterations: containers.count) { index in
-            let usage = inspector.containerUsage(containers[index])
-            lock.withLock { fetched[index] = usage }
-        }
-        var result: [String: (memory: UInt64, cpu: Double)] = [:]
-        for (container, usage) in zip(containers, fetched) {
-            guard let usage else {
-                previousContainerCPU.removeValue(forKey: container.id)
-                result[container.id] = (0, 0)
-                continue
-            }
-            var cpu = 0.0
-            if let previous = previousContainerCPU[container.id] {
-                if usage.cpuNanoseconds >= previous.nanoseconds {
-                    let elapsed = now.timeIntervalSince(previous.at)
-                    if elapsed > 0 { cpu = Double(usage.cpuNanoseconds - previous.nanoseconds) / (elapsed * 1_000_000_000) * 100 }
-                } else {
-                    // The counter only goes back when the container restarted.
-                    containerStarts.removeValue(forKey: container.id)
-                }
-            }
-            previousContainerCPU[container.id] = (usage.cpuNanoseconds, now)
-            result[container.id] = (usage.memory, cpu)
-        }
-        return result
-    }
-
-    private func containerServer(socket: ListeningSocket, container: ContainerInfo, usage: (memory: UInt64, cpu: Double)?,
+    private func containerServer(socket: ListeningSocket, container: ContainerInfo, sample: ContainerSample?, startedAt: Date?,
                                  sockets: SocketScan, config: ScanConfig, now: Date) -> Server {
-        let cwd = container.workingDirectory
+        // Compose can run inside a Linux VM, where its folder isn't on the Mac.
+        // Then there's no project or branch, but the container isn't stale.
+        let cwd = container.workingDirectory.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
         var project = cwd.map { projects.resolve(cwd: $0, command: nil) } ?? ProjectInfo(name: container.name)
         project.name = container.name
         project.framework = nil
         if !config.showBranches { project.branch = nil }
 
-        if containerStarts[container.id] == nil, let started = inspector.containerStart(container) {
-            containerStarts[container.id] = started
-        }
-
-        let memory = usage?.memory ?? 0
-        let cpu = usage?.cpu ?? 0
+        let memory = sample?.memory ?? 0
+        let cpu = sample?.cpu ?? 0
         let key = Self.key(port: socket.port, container: container)
         let connections = sockets.inboundConnections[socket.port] ?? 0
         if cpu >= 2 || connections > 0 || lastActive[key] == nil {
             lastActive[key] = now
         }
+        // Record each stats sample once. Until the first one there's nothing to
+        // chart, rather than a 0 that would later read as a leak.
         var history = histories[key] ?? []
-        history.append(Sample(time: now, memory: memory, cpu: cpu))
+        if let sample, recordedSample[key] != sample.at {
+            recordedSample[key] = sample.at
+            history.append(Sample(time: sample.at, memory: sample.memory, cpu: sample.cpu))
+        }
         history.removeAll { now.timeIntervalSince($0.time) > Self.historyWindow }
         histories[key] = history
 
@@ -284,11 +269,11 @@ final class ScanEngine: @unchecked Sendable {
             processName: socket.command,
             addresses: socket.addresses,
             cwd: cwd,
-            cwdExists: cwd.map { FileManager.default.fileExists(atPath: $0) } ?? true,
+            cwdExists: true,
             command: nil,
             launch: nil,
             launchDirectory: nil,
-            startedAt: containerStarts[container.id],
+            startedAt: startedAt,
             project: project,
             conductorWorkspace: nil,
             paneWorkspace: nil,
